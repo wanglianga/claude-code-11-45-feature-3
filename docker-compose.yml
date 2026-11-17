@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ccdev
+      POSTGRES_PASSWORD: ccdev
+      POSTGRES_DB: ccdev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ccdev -d ccdev"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+psycopg2://ccdev:ccdev@db:5432/ccdev
+      ALLOW_RESET: "1"          # 演示/验收环境允许 /admin/reset；生产置 0
+      ADMIN_KEY: admin-key
+      OPERATOR_KEY: operator-key
+      CONSUMER_KEY: consumer-key
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  consumer:
+    build: .
+    command: uvicorn app.consumer:app --host 0.0.0.0 --port 8001
+    environment:
+      DATABASE_URL: postgresql+psycopg2://ccdev:ccdev@db:5432/ccdev
+      ADMIN_KEY: admin-key
+      OPERATOR_KEY: operator-key
+      CONSUMER_KEY: consumer-key
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql+psycopg2://ccdev:ccdev@db:5432/ccdev
+      CONSUMER_KEY: consumer-key
+      WORKER_RETRY_BACKOFF_SEC: "5"
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+      consumer:
+        condition: service_started
+
+  # 一键验收回放：docker compose run --rm replay
+  replay:
+    build: .
+    profiles: ["replay"]
+    command: python scripts/replay.py
+    environment:
+      API_URL: http://api:8000
+      CONSUMER_URL: http://consumer:8001
+      ADMIN_KEY: admin-key
+      OPERATOR_KEY: operator-key
+      CONSUMER_KEY: consumer-key
+    depends_on:
+      api:
+        condition: service_started
+      consumer:
+        condition: service_started
