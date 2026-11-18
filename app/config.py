@@ -22,6 +22,12 @@ DEFAULT_MAX_INTERP_GAP_SEC = int(os.getenv("MAX_INTERP_GAP_SEC", "1800"))  # 允
 WORKER_MAX_ATTEMPTS = int(os.getenv("WORKER_MAX_ATTEMPTS", "8"))
 WORKER_RETRY_BACKOFF_SEC = int(os.getenv("WORKER_RETRY_BACKOFF_SEC", "5"))
 
+# 空间参考估计
+SPATIAL_MIN_VAL_N = int(os.getenv("SPATIAL_MIN_VAL_N", "3"))            # 每海况签发资格的最少验证样本
+SPATIAL_MAX_VAL_RMSE_M = float(os.getenv("SPATIAL_MAX_VAL_RMSE_M", "0.25"))  # 资格允许的验证 RMSE（米）
+SPATIAL_COND_LIMIT = float(os.getenv("SPATIAL_COND_LIMIT", "30.0"))    # 设计矩阵条件数阈值
+SPATIAL_ERROR_METHOD = os.getenv("SPATIAL_ERROR_METHOD", "RMSE*1.96")
+
 # 消费端模拟故障标志
 FLAG_DROP_ACK = "drop_ack"
 FLAG_OFFLINE = "offline"

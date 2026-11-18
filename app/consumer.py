@@ -16,7 +16,13 @@ from sqlalchemy import select
 
 from . import config
 from .db import SessionLocal, init_db
-from .models import ConsumerFlag, ConsumerInbox, ConsumerState
+from .models import (
+    ConsumerEstimateInbox,
+    ConsumerEstimateState,
+    ConsumerFlag,
+    ConsumerInbox,
+    ConsumerState,
+)
 from .security import require_role
 
 app = FastAPI(title="Tide Product Simulated Consumer", version="1.0.0")
@@ -43,6 +49,14 @@ def receive(subscription_name: str, payload: dict,
         key = payload.get("delivery_key")
         if not key:
             raise HTTPException(status_code=400, detail="missing delivery_key")
+
+        # 独立产品隔离：估计产品不得进入只消费实测确认值的通道
+        if payload.get("product_kind") == "SPATIAL_ESTIMATE":
+            raise HTTPException(
+                status_code=422,
+                detail="SPATIAL_ESTIMATE rejected by measured-product channel; "
+                       "use /receive-estimates/{name}",
+            )
 
         inbox = session.get(ConsumerInbox, key)
         if inbox is not None:
@@ -195,9 +209,133 @@ def get_flags(_role: str = Depends(require_role("consumer", "operator", "admin")
 def reset(_role: str = Depends(require_role("operator", "admin"))):
     session = SessionLocal()
     try:
-        for model in (ConsumerState, ConsumerInbox, ConsumerFlag):
+        for model in (ConsumerEstimateState, ConsumerEstimateInbox,
+                      ConsumerState, ConsumerInbox, ConsumerFlag):
             session.query(model).delete()
         session.commit()
         return {"reset": True}
+    finally:
+        session.close()
+
+
+# ---------------- 估计产品独立接收端（与实测通道分开） ----------------
+
+@app.post("/receive-estimates/{subscription_name}")
+def receive_estimates(subscription_name: str, payload: dict,
+                      _role: str = Depends(require_role("consumer", "operator", "admin"))):
+    """接收 SPATIAL_ESTIMATE：去重、按发布序号应用、保留独立标识与来源说明。"""
+    session = SessionLocal()
+    try:
+        if _flag(session, config.FLAG_OFFLINE):
+            raise HTTPException(status_code=503, detail="consumer offline (simulated)")
+        if payload.get("product_kind") != "SPATIAL_ESTIMATE":
+            raise HTTPException(
+                status_code=422,
+                detail="estimate endpoint accepts only product_kind=SPATIAL_ESTIMATE")
+        key = payload.get("delivery_key")
+        if not key:
+            raise HTTPException(status_code=400, detail="missing delivery_key")
+
+        inbox = session.get(ConsumerEstimateInbox, key)
+        if inbox is not None:
+            inbox.receive_count += 1
+            session.commit()
+            if _flag(session, config.FLAG_DROP_ACK):
+                raise HTTPException(status_code=500, detail="ack lost (simulated)")
+            return {"ack": True, "delivery_key": key, "deduplicated": True}
+
+        batch = payload["batch"]
+        applied = skipped = 0
+        for p in payload.get("points", []):
+            grid_time = datetime.fromisoformat(p["grid_time"])
+            if grid_time.tzinfo is None:
+                grid_time = grid_time.replace(tzinfo=timezone.utc)
+            row = session.execute(
+                select(ConsumerEstimateState).where(
+                    ConsumerEstimateState.target_station_id == batch["target_station_id"],
+                    ConsumerEstimateState.grid_time == grid_time,
+                )
+            ).scalar_one_or_none()
+            if row is not None and row.publish_seq >= batch["publish_seq"]:
+                skipped += 1  # 旧批次不覆盖新批次
+                continue
+            if row is None:
+                row = ConsumerEstimateState(
+                    target_station_id=batch["target_station_id"], grid_time=grid_time)
+                session.add(row)
+            row.batch_id = batch["id"]
+            row.product_kind = payload["product_kind"]
+            row.value_m = p["value_m"]
+            row.status = p["status"]
+            row.condition_code = p["condition_code"]
+            row.error_halfwidth = p["error_halfwidth"]
+            row.relation_id = p["relation_id"]
+            row.source_refs = p["source_refs"]
+            row.publish_seq = batch["publish_seq"]
+            row.updated_at = datetime.now(timezone.utc)
+            applied += 1
+
+        session.add(ConsumerEstimateInbox(
+            delivery_key=key,
+            subscription_name=subscription_name,
+            batch_id=batch["id"],
+            product_kind=payload["product_kind"],
+            publish_seq=batch["publish_seq"],
+            source_summary=payload.get("source_summary", {}),
+            receive_count=1,
+            applied=True,
+        ))
+        session.commit()
+
+        if _flag(session, config.FLAG_DROP_ACK):
+            raise HTTPException(status_code=500, detail="ack lost (simulated)")
+        return {"ack": True, "delivery_key": key, "deduplicated": False,
+                "applied_points": applied, "skipped_stale_points": skipped,
+                "product_kind": payload["product_kind"]}
+    finally:
+        session.close()
+
+
+@app.get("/estimate-inbox")
+def get_estimate_inbox(_role: str = Depends(require_role("consumer", "operator", "admin"))):
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            select(ConsumerEstimateInbox).order_by(ConsumerEstimateInbox.publish_seq)
+        ).scalars().all()
+        return [
+            {
+                "delivery_key": r.delivery_key, "subscription_name": r.subscription_name,
+                "batch_id": r.batch_id, "product_kind": r.product_kind,
+                "publish_seq": r.publish_seq, "source_summary": r.source_summary,
+                "receive_count": r.receive_count, "applied": r.applied,
+                "received_at": r.received_at.isoformat(),
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+@app.get("/estimate-state")
+def get_estimate_state(target_station_id: int | None = None,
+                       _role: str = Depends(require_role("consumer", "operator", "admin"))):
+    session = SessionLocal()
+    try:
+        q = select(ConsumerEstimateState).order_by(
+            ConsumerEstimateState.target_station_id, ConsumerEstimateState.grid_time)
+        if target_station_id is not None:
+            q = q.where(ConsumerEstimateState.target_station_id == target_station_id)
+        return [
+            {
+                "target_station_id": r.target_station_id,
+                "grid_time": r.grid_time.isoformat(), "batch_id": r.batch_id,
+                "product_kind": r.product_kind, "value_m": r.value_m, "status": r.status,
+                "condition_code": r.condition_code, "error_halfwidth": r.error_halfwidth,
+                "relation_id": r.relation_id, "source_refs": r.source_refs,
+                "publish_seq": r.publish_seq,
+            }
+            for r in session.execute(q).scalars()
+        ]
     finally:
         session.close()

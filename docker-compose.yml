@@ -57,11 +57,28 @@ services:
       consumer:
         condition: service_started
 
-  # 一键验收回放：docker compose run --rm replay
+  # 一键验收回放（实测产品）：docker compose run --rm replay
   replay:
     build: .
     profiles: ["replay"]
     command: python scripts/replay.py
+    environment:
+      API_URL: http://api:8000
+      CONSUMER_URL: http://consumer:8001
+      ADMIN_KEY: admin-key
+      OPERATOR_KEY: operator-key
+      CONSUMER_KEY: consumer-key
+    depends_on:
+      api:
+        condition: service_started
+      consumer:
+        condition: service_started
+
+  # 一键验收回放（缺测潮位空间参考估计）：docker compose run --rm replay-spatial
+  replay-spatial:
+    build: .
+    profiles: ["replay"]
+    command: python scripts/replay_spatial.py
     environment:
       API_URL: http://api:8000
       CONSUMER_URL: http://consumer:8001

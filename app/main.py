@@ -45,15 +45,19 @@ from .services import (
     superseded_deliveries,
 )
 from .worker import run_once as worker_run_once
+from .spatial_api import router as spatial_router
 
 app = FastAPI(
     title="潮位观测数据产品发布与订阅服务",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "站点与基准登记、产品生成（初报/确认分阶段发布）、订阅管理与交付记录。"
         "基准转换带版本快照与生效区间；产品、清单与待交付任务同事务提交。"
+        "另含缺测潮位空间参考估计（/spatial）：独立产品类型 SPATIAL_ESTIMATE，"
+        "带适用范围与验证误差，走独立订阅/交付通道，不改写实测口径与缺测事实。"
     ),
 )
+app.include_router(spatial_router)
 
 
 @app.on_event("startup")
@@ -511,3 +515,10 @@ def retry_delivery(delivery_id: int, _role: str = Depends(require_role("operator
 def run_worker_once(_role: str = Depends(require_role("operator", "admin"))):
     """同步执行一轮交付（用于验收回放；生产由独立 worker 进程循环执行）。"""
     return worker_run_once()
+
+
+@app.post("/worker/run-estimates-once")
+def run_estimate_worker_once(_role: str = Depends(require_role("operator", "admin"))):
+    """同步执行一轮估计产品交付（独立于实测交付的通道）。"""
+    from .worker import run_estimate_once
+    return run_estimate_once()
